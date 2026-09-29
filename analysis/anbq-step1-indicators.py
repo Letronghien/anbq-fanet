@@ -46,6 +46,7 @@ FEATSETS = {"local": LOCAL, "local+dist": LOCAL_DIST, "design(ref)": DESIGN}
 PAPER1_METRICS = ("pdr", "delayP95Ms", "nrl")   # pdr first
 MIN_LEAF = 3                          # cells per leaf in policy trees
 REPORT = []
+SEEDPDR = {}                          # (K,N,L) -> (pdr AODV, pdr NBQ) per paired seed, for the cross-fitted oracle
 
 
 def say(*a):
@@ -86,9 +87,12 @@ def cells(df):
         pa, pb = ga.loc[s, "pdr"].astype(float), gb.loc[s, "pdr"].astype(float)
         r = dict(K=K, N=N, L=L, Kord=KS.index(K), n=len(s), pdrA=pa.mean(), pdrB=pb.mean(), diff=(pb - pa).mean(),
                  seedOracle=np.maximum(pa, pb).mean())
+        SEEDPDR[(K, N, L)] = (pa.to_numpy(float), pb.to_numpy(float))
         for m in PAPER1_METRICS:  # same tests as Paper-1 analyze_main.py (Holm over all of them below)
             xa = pd.to_numeric(ga.loc[s, m], errors="coerce"); xb = pd.to_numeric(gb.loc[s, m], errors="coerce")
             d = xb - xa
+            r[f"d_{m}"] = d.mean()
+            r[f"ci_{m}"] = stats.t.ppf(0.975, len(d) - 1) * d.std(ddof=1) / math.sqrt(len(d)) if len(d) > 1 else np.nan
             try:
                 r[f"p_{m}"] = stats.wilcoxon(xb, xa).pvalue if (d != 0).any() else 1.0
             except ValueError:
@@ -101,10 +105,31 @@ def cells(df):
     # Holm over all 3 metrics x cells, exactly as Paper-1 compare_vs_aodv("E2") -> identical regime labels
     P = c[[f"p_{m}" for m in PAPER1_METRICS]].to_numpy(float)
     c["p"] = c["p_pdr"]
-    c["p_holm"] = holm(P.ravel()).reshape(P.shape)[:, 0]
+    adj = holm(P.ravel()).reshape(P.shape)
+    for i, m in enumerate(PAPER1_METRICS):
+        c[f"ph_{m}"] = adj[:, i]
+    c["p_holm"] = c["ph_pdr"]
     c["regime"] = np.where(c.p_holm < 0.05, np.where(c["diff"] > 0, "NBQ better", "AODV better"), "equivalent")
     c["best"] = np.where(c.pdrB > c.pdrA, "NBQ", "AODV")
     return c
+
+
+def xfit_oracle(c, reps, rng):
+    """cross-fitted cell oracle: choose the protocol on one random half of the paired seeds, score it on the
+    other half (and vice versa). Removes the upward 'max of two noisy means' bias of the plain cell oracle;
+    it is biased slightly downward instead (choice made on half the seeds), so the true oracle lies between."""
+    vals = []
+    for _ in range(reps):
+        tot = 0.0
+        for K, N, L in zip(c.K, c.N, c.L):
+            pa, pb = SEEDPDR[(K, N, L)]
+            idx = rng.permutation(len(pa)); h1, h2 = idx[: len(idx) // 2], idx[len(idx) // 2:]
+            v = 0.0
+            for sel, ev in ((h1, h2), (h2, h1)):
+                v += (pb[ev].mean() if pb[sel].mean() > pa[sel].mean() else pa[ev].mean()) / 2
+            tot += v
+        vals.append(tot / len(c))
+    return float(np.mean(vals))
 
 
 def X_of(c, feats, source):
@@ -240,6 +265,21 @@ def main():
     say(f"mean PDR over cells: always-AODV {fa:.2f}  always-NBQ {fb:.2f}  cell-oracle {orc:.2f}  "
         f"seed-oracle {c.seedOracle.mean():.2f}")
     say(f"cell-oracle gain over best fixed: {orc - max(fa, fb):+.2f} points  (denominator of 'fraction recovered')")
+    global ORC_XF
+    ORC_XF = xfit_oracle(c, 300, rng)
+    say(f"cross-fitted cell oracle {ORC_XF:.2f} -> gain over best fixed {ORC_XF - max(fa, fb):+.2f} points "
+        f"(noise-corrected lower bracket; the true oracle gain lies between this and the plain one)")
+
+    say("\n[A2] per-cell NBQ - AODV difference, mean over paired seeds (* Holm p < 0.05, Holm as in Paper 1)")
+    for m, unit in (("pdr", "PDR points"), ("delayP95Ms", "p95 delay ms, negative = NBQ faster"),
+                    ("nrl", "NRL, negative = NBQ less overhead")):
+        t = c.copy()
+        t["cell"] = t.apply(lambda r: f"{r[f'd_{m}']:+7.1f}{'*' if r[f'ph_{m}'] < 0.05 else ' '}", axis=1)
+        say(f"-- {m} ({unit})")
+        say(t.pivot_table(index=["N", "L"], columns="K", values="cell", aggfunc="first").to_string())
+        say("   per-channel mean: " + ", ".join(f"{K} {t[t.K == K][f'd_{m}'].mean():+.2f}" for K in KS if (t.K == K).any())
+            + f";  significant cells: NBQ better {int(((t[f'ph_{m}'] < 0.05) & (t[f'd_{m}'] * (1 if m == 'pdr' else -1) > 0)).sum())}, "
+            + f"AODV better {int(((t[f'ph_{m}'] < 0.05) & (t[f'd_{m}'] * (1 if m == 'pdr' else -1) < 0)).sum())}")
 
     # --- B. univariate: Spearman with diff, overall and within channel
     say("\n[B] Spearman rho of indicator (cell mean) with NBQ - AODV PDR difference")
@@ -283,13 +323,16 @@ def main():
                 lo, hi = boot_ci(c, p, a.boot, rng) if cvname == "LOCO" else (np.nan, np.nan)
                 rows.append(dict(features=fs, source=s_tr if s_tr == s_te else f"{s_tr}->{s_te}", model=model,
                                  cv=cvname, V=value(c, p), frac=frac(c, p), frac_lo=lo, frac_hi=hi,
+                                 frac_xf=(value(c, p) - max(fa, fb)) / (ORC_XF - max(fa, fb))
+                                 if ORC_XF - max(fa, fb) > 1e-9 else np.nan,
                                  pickNBQ=p.mean(), agree_best=(p == (c.best == "NBQ")).mean(),
                                  sig_wrong=int(((c.regime == "NBQ better") & ~p).sum()
                                                + ((c.regime == "AODV better") & p).sum())))
     pol = pd.DataFrame(rows); pol.to_csv(os.path.join(a.out, "anbq-step1-policies.csv"), index=False)
     say("\n[D] cross-validated policies (V = mean PDR over cells; frac = fraction of oracle gain recovered,")
     say("    95% cell-bootstrap CI for LOCO; LOCO = leave one cell out, LOKO = leave one channel out;")
-    say("    sig_wrong = cells with a significant regime where the policy picks the worse protocol)")
+    say("    sig_wrong = cells with a significant regime where the policy picks the worse protocol;")
+    say("    frac_xf = same with the cross-fitted oracle as denominator; > 1 means the plain oracle gain is mostly noise)")
     say(f"    reference: always-AODV {fa:.2f}, always-NBQ {fb:.2f}, oracle {orc:.2f}")
     say(pol.round(3).to_string(index=False))
 

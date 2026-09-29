@@ -12,6 +12,8 @@ tell "NBQ better" cells from "AODV better" cells, and how much of the oracle gai
 | Part | What | Why |
 |---|---|---|
 | A | Regime counts and oracle; Holm exactly as Paper 1 (PDR, p95 delay, NRL together) | Sanity check: must reproduce Paper-1 `report.txt` |
+| A2 | Per-cell NBQ − AODV table for PDR, p95 delay and NRL (Holm as Paper 1) | Where the regimes are, and whether delay tells a different story than PDR |
+| A3 | Cross-fitted oracle: choose on half the seeds, score on the other half | The plain cell oracle is biased upward (max of two noisy means); the true gain lies between the two |
 | B | Spearman ρ of each indicator with the NBQ − AODV PDR difference, over all cells and **within each channel** | Paper 1 only has the pooled ρ; a pooled ρ can come only from channel differences |
 | C | Mode invariance: indicator in NBQ runs vs in AODV runs | A node sees its signals in its *current* mode; a threshold that moves with the mode causes oscillation |
 | D | Cross-validated **policies**: depth-1/2 policy trees and cost-sensitive logistic regression; feature sets `local`, `local+dist`, `design(ref)`; LOCO and LOKO | Key number = fraction of oracle gain recovered |
@@ -27,6 +29,7 @@ Definitions:
 - Logistic: label = NBQ better, weight = |PDR difference|, L2 (λ = 1), standardised features.
 - Fraction recovered = (V_policy − V_bestfixed) / (V_oracle − V_bestfixed); V = mean PDR over cells;
   best-fixed = better of always-AODV / always-NBQ; 95 % CI by cell bootstrap (LOCO).
+  `frac_xf` uses the cross-fitted oracle as denominator.
 - LOCO = leave one cell out (36 folds). LOKO = leave one channel out (3 folds; the rule has never seen
   that channel). `aodv->nbq` = trained on AODV-run indicators, applied to NBQ-run indicators.
 
