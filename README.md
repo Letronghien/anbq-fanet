@@ -27,3 +27,4 @@ VM: repo `~/anbq-repo`, isolated ns-3 tree `~/anbq-fanet/ns-3-anbq`, results `~/
 | Step | Content |
 |---|---|
 | 0 | Isolated ns-3.48 tree, Paper-1 baseline imported, `anbq-` naming, bit-exact verification |
+| 1 | Which local indicators separate NBQ-better from AODV-better cells (Paper-1 E2); oracle gain recoverable by simple rules |
